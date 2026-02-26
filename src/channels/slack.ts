@@ -150,17 +150,20 @@ slackApp.message(async ({ message, say }) => {
   // Check if this is a DM
   const isDM = isDirectMessage(channel);
 
-  // For DMs, check pairing/approval
-  if (isDM && config.security.dmPolicy !== 'open') {
-    if (!isUserApproved(user)) {
-      // Generate pairing code
-      const code = generatePairingCode(user);
+  // PERSONAL ASSISTANT MODE: Auto-approve your own DMs
+  if (isDM) {
+    const adminUsers = config.security.adminUserIds || [];
+    if (!adminUsers.includes(user)) {
+      // If not admin, block them (this is YOUR personal bot now)
+      logger.info(`Blocking non-admin user ${user} from DM`);
       await say({
-        text: `👋 Hi! Before we chat, you need to be approved.\n\nYour pairing code is: \`${code}\`\n\nAsk an admin to approve you with: \`/approve ${code}\`\n\nThis code expires in 1 hour.`,
+        text: "This is a personal assistant bot and is not available for public use.",
         thread_ts: ts,
       });
       return;
     }
+    // Admin user (you) is auto-approved - continue processing
+    logger.info(`Auto-approved admin user ${user}`);
   }
 
   // For channel messages, check if bot is mentioned or channel is allowed
@@ -182,7 +185,7 @@ slackApp.message(async ({ message, say }) => {
   // Handle special commands
   if (cleanText.toLowerCase() === '/help' || cleanText.toLowerCase() === 'help') {
     await say({
-      text: `🤖 *Slack AI Assistant - Help*\n\n*Commands:*\n• \`help\` - Show this help message\n• \`summarize\` or \`tldr\` - Summarize the current thread\n• \`remind me [task] at [time]\` - Schedule a reminder\n• \`my tasks\` - List your scheduled tasks\n• \`cancel task [id]\` - Cancel a scheduled task\n• \`/reset\` - Clear conversation history\n\n*Features:*\n• I remember our conversation context\n• I can help with questions, analysis, and tasks\n• Mention me in channels: <@${currentBotId}>\n\n*Tips:*\n• Start a thread for focused conversations\n• Use \`summarize\` in long threads to catch up`,
+      text: `🤖 *Personal Assistant - Help*\n\n*Commands:*\n• \`help\` - Show this help message\n• \`summarize\` or \`tldr\` - Summarize the current thread\n• \`remind me [task] at [time]\` - Schedule a reminder\n• \`my tasks\` - List your scheduled tasks\n• \`cancel task [id]\` - Cancel a scheduled task\n• \`/reset\` - Clear conversation history\n\n*Features:*\n• I remember our conversations\n• GitHub & Notion integration\n• RAG search across your Slack history\n\n*Tips:*\n• DM me anything\n• Mention me in channels: <@${currentBotId}>`,
       thread_ts: thread_ts || ts,
     });
     return;
@@ -401,7 +404,7 @@ slackApp.event('app_mention', async ({ event, say }) => {
 // Slash Commands
 // ============================================
 
-// Approve pairing command
+// Approve pairing command - kept for compatibility but won't be used much
 slackApp.command('/approve', async ({ command, ack, respond }) => {
   await ack();
 
@@ -430,7 +433,7 @@ slackApp.command('/assistant-status', async ({ command, ack, respond }) => {
   };
 
   await respond({
-    text: `🤖 *Assistant Status*\n\`\`\`${JSON.stringify(status, null, 2)}\`\`\``,
+    text: `🤖 *Personal Assistant Status*\n\`\`\`${JSON.stringify(status, null, 2)}\`\`\``,
     response_type: 'ephemeral',
   });
 });
