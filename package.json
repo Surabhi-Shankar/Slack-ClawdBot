@@ -14,11 +14,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.27.0",
-    "@slack/bolt": "^4.1.0",
+    "@anthropic-ai/sdk": "^0.27.3",
+    "@slack/bolt": "^4.6.0",
     "@slack/web-api": "^7.5.0",
     "better-sqlite3": "^11.3.0",
-    "dotenv": "^16.4.5",
+    "cohere-ai": "^7.20.0",
+    "dotenv": "^16.6.1",
     "mem0ai": "^1.0.2",
     "node-cron": "^3.0.3",
     "openai": "^4.67.0",

@@ -36,11 +36,12 @@
  * For production with large datasets, consider running a ChromaDB server.
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { dirname, join } from 'path';
 import { config } from '../config/index.js';
 import { createModuleLogger } from '../utils/logger.js';
 import { cosineSimilarity } from './embeddings.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { dirname, join } from 'path';
+
 
 const logger = createModuleLogger('vectorstore');
 

@@ -5,78 +5,63 @@
  * 1. RAG (Retrieval Augmented Generation) - for Slack message history
  * 2. mem0 Long-Term Memory - for user preferences and context
  * 3. MCP (Model Context Protocol) - for GitHub, Notion, and other tools
- * 
- * HOW MCP WORKS:
- * --------------
- * 1. On startup, connects to configured MCP servers (GitHub, Notion)
- * 2. Discovers available tools from each server
- * 3. Merges MCP tools with Slack tools for the LLM
- * 4. Routes tool calls to the appropriate handler
- * 
- * EXAMPLE:
- * --------
- * User: "Create a GitHub issue for the login bug"
- * Agent: [calls github_create_issue tool]
- * Response: "Created issue #42: 'Fix login timeout bug'"
  */
 
-import OpenAI from 'openai';
-import { WebClient } from '@slack/web-api';
+import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config/index.js';
-import { createModuleLogger } from '../utils/logger.js';
-import { getSessionHistory, addMessage, Message, getUserTasks } from '../memory/database.js';
-import { 
-  shouldUseRAG, 
-  retrieve, 
+import { addMessage, getSessionHistory, Message } from '../memory/database.js';
+import {
   buildContextString,
   parseQueryFilters,
+  retrieve,
+  shouldUseRAG,
 } from '../rag/index.js';
-import {
-  sendMessage,
-  getConversationWith,
-  getChannelHistory,
-  searchMessages,
-  findUser,
-  findChannel,
-  listUsers,
-  listChannels,
-  formatMessagesForContext,
-  scheduleMessage,
-  listScheduledMessages,
-  deleteScheduledMessage,
-  setReminder,
-  listReminders,
-  deleteReminder,
-} from '../tools/slack-actions.js';
 import { taskScheduler } from '../tools/scheduler.js';
+import {
+  findChannel,
+  formatMessagesForContext,
+  getChannelHistory,
+  listChannels,
+  listUsers,
+  scheduleMessage,
+  sendMessage,
+  setReminder
+} from '../tools/slack-actions.js';
+import { createModuleLogger } from '../utils/logger.js';
 
 // Memory imports (mem0)
 import {
-  initializeMemory,
   addMemory,
-  searchMemory,
-  getAllMemories,
-  deleteMemory,
-  deleteAllMemories,
   buildMemoryContext,
+  deleteAllMemories,
+  deleteMemory,
+  getAllMemories,
   isMemoryEnabled,
+  searchMemory
 } from '../memory-ai/index.js';
 
 // MCP imports
 import {
-  getAllMCPTools,
-  executeMCPTool,
-  parseToolName,
-  isMCPEnabled,
-  getConnectedServers,
-  mcpToolsToOpenAI,
+  executeMCPTool, // We'll create this
   formatMCPResult,
+  getAllMCPTools,
+  isMCPEnabled,
+  parseToolName
 } from '../mcp/index.js';
 
 const logger = createModuleLogger('agent');
 
-// Initialize clients
-const openaiClient = new OpenAI({ apiKey: config.ai.openaiApiKey });
+// Initialize Claude client
+let anthropicClient: Anthropic | null = null;
+
+if (config.ai.anthropicApiKey) {
+  anthropicClient = new Anthropic({
+    apiKey: config.ai.anthropicApiKey,
+  });
+  logger.info('Claude client initialized');
+} else {
+  logger.error('ANTHROPIC_API_KEY is missing - agent will not work');
+}
 
 /**
  * System prompt that explains RAG and MCP capabilities.
@@ -119,10 +104,24 @@ If a tool fails, report the error. But ALWAYS TRY FIRST.
 - For GitHub/Notion results, format nicely with links`;
 
 /**
- * Slack tool definitions for OpenAI function calling.
- * These are the built-in Slack tools.
+ * Convert our tools to Claude's tool format
  */
-const SLACK_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
+function toolsToClaudeFormat(tools: any[]) {
+  return tools.map(tool => ({
+    name: tool.function.name,
+    description: tool.function.description,
+    input_schema: {
+      type: tool.function.parameters.type,
+      properties: tool.function.parameters.properties,
+      required: tool.function.parameters.required || [],
+    },
+  }));
+}
+
+/**
+ * Slack tool definitions for Claude.
+ */
+const SLACK_TOOLS = [
   {
     type: 'function',
     function: {
@@ -290,23 +289,24 @@ const SLACK_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
 
 /**
  * Get all available tools (Slack + MCP).
- * MCP tools are dynamically discovered from connected servers.
  */
-function getAllTools(): OpenAI.Chat.ChatCompletionTool[] {
+function getAllTools() {
   const allTools = [...SLACK_TOOLS];
 
   // Add MCP tools if available
   if (isMCPEnabled()) {
     const mcpTools = getAllMCPTools();
-    const openAIMcpTools = mcpToolsToOpenAI(mcpTools);
+    // Convert MCP tools to OpenAI format first
+    const openAIMcpTools = mcpTools.map(tool => ({
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      },
+    }));
     allTools.push(...openAIMcpTools);
     logger.info(`Total tools available: ${allTools.length} (${SLACK_TOOLS.length} Slack + ${openAIMcpTools.length} MCP)`);
-    
-    // Log MCP tool names for debugging
-    const mcpToolNames = mcpTools.map(t => t.name).join(', ');
-    logger.debug(`MCP tools: ${mcpToolNames}`);
-  } else {
-    logger.debug(`MCP not enabled, using ${SLACK_TOOLS.length} Slack tools only`);
   }
 
   return allTools;
@@ -355,30 +355,20 @@ async function executeTool(
         
         // Clean up query - remove Slack formatting
         searchQuery = searchQuery
-          .replace(/<#[A-Z0-9]+\|([^>]+)>/g, '#$1')  // <#C123|name> → #name
-          .replace(/<#[A-Z0-9]+>/g, '')               // <#C123> → remove
-          .replace(/<@[A-Z0-9]+>/g, '')               // <@U123> → remove
-          .replace(/<https?:\/\/[^>]+>/g, '')         // URLs → remove
+          .replace(/<#[A-Z0-9]+\|([^>]+)>/g, '#$1')
+          .replace(/<#[A-Z0-9]+>/g, '')
+          .replace(/<@[A-Z0-9]+>/g, '')
+          .replace(/<https?:\/\/[^>]+>/g, '')
           .trim();
         
-        // If channel_name looks like an ID (starts with C), try to resolve it
+        // Resolve channel if needed
         if (channelNameFilter && channelNameFilter.startsWith('C') && channelNameFilter.length > 8) {
           const channel = await findChannel(channelNameFilter);
           if (channel) {
             channelNameFilter = channel.name;
-            logger.info(`Resolved channel ID ${args.channel_name} to name: ${channelNameFilter}`);
           }
         }
         
-        // Also handle <#CXXXXX|name> format from Slack
-        if (channelNameFilter && channelNameFilter.includes('|')) {
-          const match = channelNameFilter.match(/<#[A-Z0-9]+\|([^>]+)>/);
-          if (match) {
-            channelNameFilter = match[1];
-          }
-        }
-        
-        // Remove # prefix and Slack formatting if present
         if (channelNameFilter) {
           channelNameFilter = channelNameFilter
             .replace(/<#[A-Z0-9]+\|([^>]+)>/g, '$1')
@@ -387,20 +377,14 @@ async function executeTool(
             .trim();
         }
         
-        logger.info(`RAG search: query="${searchQuery}", channel="${channelNameFilter || 'all'}"`);
-        
         const results = await retrieve(searchQuery, {
           limit: (args.limit as number) || 10,
           channelName: channelNameFilter,
-          minScore: 0.3,  // Lower threshold to get more results
+          minScore: 0.3,
         });
         
-        logger.info(`RAG search returned ${results.results.length} results`);
-        
         if (results.results.length === 0) {
-          // Try without channel filter if no results
           if (channelNameFilter) {
-            logger.info(`No results with channel filter, trying without...`);
             const broaderResults = await retrieve(searchQuery, {
               limit: (args.limit as number) || 10,
               minScore: 0.3,
@@ -460,7 +444,6 @@ async function executeTool(
         const scheduleStr = (args.schedule as string).toLowerCase();
         let cronExpression: string | null = null;
         
-        // Parse time
         const timeMatch = scheduleStr.match(/at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
         let hours = 9, minutes = 0;
         if (timeMatch) {
@@ -471,7 +454,6 @@ async function executeTool(
           if (period === 'am' && hours === 12) hours = 0;
         }
         
-        // Parse pattern
         if (scheduleStr.includes('every day') || scheduleStr.includes('daily') || scheduleStr.includes('everyday')) {
           cronExpression = `${minutes} ${hours} * * *`;
         } else if (scheduleStr.includes('every weekday')) {
@@ -479,7 +461,6 @@ async function executeTool(
         } else if (scheduleStr.includes('every monday')) {
           cronExpression = `${minutes} ${hours} * * 1`;
         }
-        // Add more patterns as needed...
         
         if (!cronExpression) {
           return `❌ Could not parse schedule: "${args.schedule}"`;
@@ -562,7 +543,6 @@ async function executeTool(
           return `I don't have any memories about "${topic}".`;
         }
         
-        // Delete matching memories
         let deleted = 0;
         for (const mem of memories) {
           if (mem.id) {
@@ -612,20 +592,16 @@ async function executeTool(
 
 /**
  * Process a message with RAG enhancement and Long-Term Memory.
- * 
- * This is the main entry point for the agent. It:
- * 1. Retrieves relevant memories about the user
- * 2. Checks if RAG would help
- * 3. Retrieves relevant Slack history if needed
- * 4. Processes with LLM + tools
- * 5. Stores new memories from conversation
- * 6. Returns response
  */
 export async function processMessage(
   userMessage: string,
   context: AgentContext
 ): Promise<AgentResponse> {
   logger.info(`Processing message for session: ${context.sessionId}`);
+
+  if (!anthropicClient) {
+    throw new Error('Claude client not initialized. Check ANTHROPIC_API_KEY');
+  }
 
   // Save user message to history
   addMessage(context.sessionId, 'user', userMessage);
@@ -677,29 +653,26 @@ export async function processMessage(
     }
   }
 
-  // 3. Build messages for LLM
+  // 3. Build messages for Claude
   const history = getSessionHistory(context.sessionId);
-  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-  ];
-
-  // Add memory context if available
+  
+  // Build the system prompt with context
+  let systemPrompt = SYSTEM_PROMPT;
+  
+  // Add memory context
   if (memoryContext) {
-    messages.push({ 
-      role: 'system', 
-      content: memoryContext 
-    });
+    systemPrompt += `\n\n## MEMORIES ABOUT THE USER:\n${memoryContext}`;
   }
-
-  // Add RAG context if available
+  
+  // Add RAG context
   if (ragContext) {
-    messages.push({ 
-      role: 'system', 
-      content: `The following context from Slack history may be relevant to the user's question:\n\n${ragContext}` 
-    });
+    systemPrompt += `\n\n## RELEVANT SLACK HISTORY:\n${ragContext}`;
   }
 
-  // Add conversation history
+  // Build conversation messages
+  const messages: Anthropic.MessageParam[] = [];
+  
+  // Add conversation history (last 10 messages)
   for (const msg of history.slice(-10)) {
     messages.push({
       role: msg.role as 'user' | 'assistant',
@@ -710,70 +683,90 @@ export async function processMessage(
   // Add current message
   messages.push({ role: 'user', content: userMessage });
 
-  // Get all tools (Slack + MCP)
+  // Get all tools
   const tools = getAllTools();
-  logger.info(`Calling LLM with ${tools.length} tools`);
+  const claudeTools = toolsToClaudeFormat(tools);
   
-  // Log tool names for debugging
-  const toolNames = tools.map(t => t.function.name).slice(0, 10);
-  logger.info(`First 10 tools: ${toolNames.join(', ')}...`);
-  
-  // 4. Call LLM with tools
-  let response = await openaiClient.chat.completions.create({
-    model: config.ai.defaultModel.includes('gpt') ? config.ai.defaultModel : 'gpt-4o',
-    messages,
-    tools,
-    tool_choice: 'auto',
+  logger.info(`Calling Claude with ${claudeTools.length} tools`);
+
+  // 4. Call Claude with tools
+  let response = await anthropicClient.messages.create({
+    model: config.ai.defaultModel,
     max_tokens: 4096,
+    system: systemPrompt,
+    messages: messages,
+    tools: claudeTools,
   });
 
-  let assistantMessage = response.choices[0]?.message;
+  let finalContent = '';
+  
+  // Handle tool calls if any
+  while (response.stop_reason === 'tool_use') {
+    const toolCalls = response.content.filter(block => block.type === 'tool_use');
+    
+    // Add assistant's response to messages
+    messages.push({
+      role: 'assistant',
+      content: response.content,
+    });
 
-  // Handle tool calls
-  while (assistantMessage?.tool_calls && assistantMessage.tool_calls.length > 0) {
-    messages.push(assistantMessage);
+    // Execute each tool
+    for (const toolCall of toolCalls) {
+      const result = await executeTool(
+        toolCall.name,
+        toolCall.input as Record<string, unknown>,
+        context
+      );
 
-    for (const toolCall of assistantMessage.tool_calls) {
-      const args = JSON.parse(toolCall.function.arguments);
-      const result = await executeTool(toolCall.function.name, args, context);
-
+      // Add tool result
       messages.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
-        content: result,
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: toolCall.id,
+            content: result,
+          },
+        ],
       });
     }
 
-    response = await openaiClient.chat.completions.create({
-      model: config.ai.defaultModel.includes('gpt') ? config.ai.defaultModel : 'gpt-4o',
-      messages,
-      tools,
-      tool_choice: 'auto',
+    // Get next response from Claude
+    response = await anthropicClient.messages.create({
+      model: config.ai.defaultModel,
       max_tokens: 4096,
+      system: systemPrompt,
+      messages: messages,
+      tools: claudeTools,
     });
-
-    assistantMessage = response.choices[0]?.message;
   }
 
-  const content = assistantMessage?.content || 'I encountered an error processing your request.';
+  // Extract final text content
+  finalContent = response.content
+    .filter(block => block.type === 'text')
+    .map(block => block.text)
+    .join('\n');
+
+  if (!finalContent) {
+    finalContent = 'I encountered an error processing your request.';
+  }
 
   // Save response to history
-  addMessage(context.sessionId, 'assistant', content);
+  addMessage(context.sessionId, 'assistant', finalContent);
 
-  // 5. Store new memories from this conversation (async, don't wait)
+  // 5. Store new memories from this conversation (async)
   if (config.memory.enabled && isMemoryEnabled()) {
-    // Run in background to not slow down response
     addMemory([
       { role: 'user', content: userMessage },
-      { role: 'assistant', content: content }
+      { role: 'assistant', content: finalContent }
     ], context.userId).catch(err => {
       logger.error(`Failed to store memory: ${err.message}`);
     });
   }
 
   return {
-    content,
-    shouldThread: context.threadTs !== null || content.length > 500,
+    content: finalContent,
+    shouldThread: context.threadTs !== null || finalContent.length > 500,
     ragUsed,
     sourcesCount,
     memoryUsed,
@@ -787,13 +780,16 @@ export async function processMessage(
 export { processMessage as default };
 
 /**
- * Summarize thread messages.
- * Used for the /summarize command.
+ * Summarize thread messages using Claude.
  */
 export async function summarizeThread(
   messages: Message[],
   context: AgentContext
 ): Promise<string> {
+  if (!anthropicClient) {
+    throw new Error('Claude client not initialized');
+  }
+
   if (messages.length === 0) {
     return 'No messages to summarize.';
   }
@@ -813,14 +809,13 @@ ${conversationText}
 
 Summary:`;
 
-  const response = await openaiClient.chat.completions.create({
-    model: config.ai.defaultModel.includes('gpt') ? config.ai.defaultModel : 'gpt-4o',
+  const response = await anthropicClient.messages.create({
+    model: config.ai.defaultModel,
+    max_tokens: 1000,
     messages: [
-      { role: 'system', content: 'You are a helpful assistant that summarizes conversations.' },
       { role: 'user', content: summaryPrompt },
     ],
-    max_tokens: 1000,
   });
 
-  return response.choices[0]?.message?.content || 'Failed to generate summary.';
+  return response.content[0].text || 'Failed to generate summary.';
 }

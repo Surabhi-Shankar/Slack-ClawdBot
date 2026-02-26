@@ -30,25 +30,22 @@
  */
 
 export {
-  initializeMCP,
-  shutdownMCP,
-  getAllMCPTools,
-  executeMCPTool,
-  parseToolName,
-  isMCPEnabled,
-  getConnectedServers,
-  type MCPTool,
+  executeMCPTool, getAllMCPTools, getConnectedServers, initializeMCP, isMCPEnabled, parseToolName, shutdownMCP, type MCPTool
 } from './client.js';
 
 export {
   loadMCPConfig,
-  validateMCPConfig,
-  type MCPServerConfig,
-  type MCPConfig,
+  validateMCPConfig, type MCPConfig, type MCPServerConfig
 } from './config.js';
 
 export {
-  mcpToolToOpenAI,
-  mcpToolsToOpenAI,
-  formatMCPResult,
+  formatMCPResult, mcpToolsToOpenAI, mcpToolToOpenAI
 } from './tool-converter.js';
+// Add to mcp/index.ts
+export function mcpToolsToClaude(mcpTools: any[]) {
+  return mcpTools.map(tool => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema,
+  }));
+}

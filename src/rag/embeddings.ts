@@ -1,66 +1,25 @@
 /**
- * Embeddings Module
- * 
- * This module handles converting text into vector embeddings using OpenAI's
- * embedding API. Embeddings are numerical representations of text that capture
- * semantic meaning - similar texts will have similar embedding vectors.
- * 
- * WHY EMBEDDINGS?
- * ---------------
- * Traditional keyword search fails when:
- * - User says "payment issues" but messages say "billing problems"
- * - User asks about "deployment" but messages mention "releases"
- * 
- * Embeddings solve this by representing meaning, not just words.
- * "payment issues" and "billing problems" will have similar vectors
- * because they mean similar things.
- * 
- * HOW IT WORKS:
- * -------------
- * 1. Send text to OpenAI's embedding API
- * 2. Receive a vector of 1536 floating-point numbers
- * 3. Store vector in a vector database
- * 4. Compare vectors using cosine similarity to find similar content
- * 
- * EXAMPLE:
- * --------
- * Text: "The deployment failed due to memory issues"
- * Vector: [0.023, -0.041, 0.087, ..., 0.012] (1536 dimensions)
- * 
- * Similar text: "The release crashed because of RAM problems"
- * Vector: [0.025, -0.039, 0.085, ..., 0.014] (very close to above!)
+ * Embeddings Module - Cohere Version
  */
 
-import OpenAI from 'openai';
-import { config } from '../config/index.js';
+import { CohereClient } from 'cohere-ai';
 import { createModuleLogger } from '../utils/logger.js';
 
 const logger = createModuleLogger('embeddings');
 
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: config.ai.openaiApiKey,
+// Initialize Cohere client
+const cohere = new CohereClient({
+  token: process.env.COHERE_API_KEY,
 });
 
-// Embedding model configuration
-// text-embedding-3-small: Good balance of quality and cost
-// text-embedding-3-large: Higher quality, more expensive
-const EMBEDDING_MODEL = 'text-embedding-3-small';
-const EMBEDDING_DIMENSIONS = 1536;
-
-// Rate limiting configuration
-const MAX_BATCH_SIZE = 100; // OpenAI allows up to 2048, but we stay conservative
-const RATE_LIMIT_DELAY_MS = 100; // Small delay between batches
+// Cohere embedding configuration
+const EMBEDDING_MODEL = 'embed-english-v3.0';
+const EMBEDDING_DIMENSIONS = 1024;
+const MAX_BATCH_SIZE = 96;
+const RATE_LIMIT_DELAY_MS = 100;
 
 /**
  * Create an embedding for a single text string.
- * 
- * @param text - The text to embed
- * @returns A vector of floating-point numbers representing the text
- * 
- * @example
- * const embedding = await createEmbedding("What is the deployment process?");
- * console.log(embedding.length); // 1536
  */
 export async function createEmbedding(text: string): Promise<number[]> {
   if (!text || text.trim().length === 0) {
@@ -69,41 +28,22 @@ export async function createEmbedding(text: string): Promise<number[]> {
   }
 
   try {
-    const response = await openai.embeddings.create({
+    const response = await cohere.embed({
+      texts: [text],
       model: EMBEDDING_MODEL,
-      input: text,
+      inputType: 'search_document',
     });
 
-    const embedding = response.data[0].embedding;
-    logger.debug(`Created embedding for text (${text.length} chars)`);
-    
-    return embedding;
+    logger.debug(`Created Cohere embedding for text (${text.length} chars)`);
+    return response.embeddings[0];
   } catch (error: any) {
-    logger.error(`Failed to create embedding: ${error.message}`);
+    logger.error(`Failed to create Cohere embedding: ${error.message}`);
     throw new Error(`Embedding failed: ${error.message}`);
   }
 }
 
 /**
  * Create embeddings for multiple texts in a batch.
- * More efficient than calling createEmbedding() multiple times.
- * 
- * WHY BATCH?
- * ----------
- * - Reduces API calls (cost and latency)
- * - OpenAI processes batches more efficiently
- * - Better for indexing large amounts of content
- * 
- * @param texts - Array of texts to embed
- * @returns Array of embeddings in the same order as inputs
- * 
- * @example
- * const embeddings = await createEmbeddings([
- *   "First message",
- *   "Second message",
- *   "Third message"
- * ]);
- * // embeddings[0] corresponds to "First message", etc.
  */
 export async function createEmbeddings(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) {
@@ -124,25 +64,26 @@ export async function createEmbeddings(texts: string[]): Promise<number[][]> {
 
   const results: number[][] = new Array(texts.length).fill(null);
   
-  // Process in batches to respect rate limits
+  // Process in batches
   for (let i = 0; i < validTexts.length; i += MAX_BATCH_SIZE) {
     const batch = validTexts.slice(i, i + MAX_BATCH_SIZE);
     
     try {
-      logger.info(`Processing embedding batch ${Math.floor(i / MAX_BATCH_SIZE) + 1}/${Math.ceil(validTexts.length / MAX_BATCH_SIZE)}`);
+      logger.info(`Processing Cohere embedding batch ${Math.floor(i / MAX_BATCH_SIZE) + 1}/${Math.ceil(validTexts.length / MAX_BATCH_SIZE)}`);
       
-      const response = await openai.embeddings.create({
+      const response = await cohere.embed({
+        texts: batch.map(b => b.text),
         model: EMBEDDING_MODEL,
-        input: batch.map(b => b.text),
+        inputType: 'search_document',
       });
 
       // Map results back to original positions
-      response.data.forEach((item, batchIndex) => {
+      response.embeddings.forEach((embedding, batchIndex) => {
         const originalIndex = batch[batchIndex].index;
-        results[originalIndex] = item.embedding;
+        results[originalIndex] = embedding;
       });
 
-      // Small delay between batches to avoid rate limits
+      // Small delay between batches
       if (i + MAX_BATCH_SIZE < validTexts.length) {
         await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY_MS));
       }
@@ -159,28 +100,12 @@ export async function createEmbeddings(texts: string[]): Promise<number[][]> {
     }
   }
 
-  logger.info(`Created ${validTexts.length} embeddings`);
+  logger.info(`Created ${validTexts.length} Cohere embeddings`);
   return results;
 }
 
 /**
  * Calculate cosine similarity between two vectors.
- * 
- * WHAT IS COSINE SIMILARITY?
- * --------------------------
- * A measure of how similar two vectors are, ranging from -1 to 1:
- * - 1.0 = Identical meaning
- * - 0.0 = Completely unrelated
- * - -1.0 = Opposite meaning (rare with text embeddings)
- * 
- * For text embeddings, scores typically range from 0.3 to 0.95:
- * - > 0.85 = Very similar content
- * - 0.70-0.85 = Related content
- * - < 0.70 = Probably different topics
- * 
- * @param a - First embedding vector
- * @param b - Second embedding vector
- * @returns Similarity score between -1 and 1
  */
 export function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length) {
@@ -208,37 +133,28 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 
 /**
  * Prepare text for embedding by cleaning and normalizing.
- * 
- * WHY PREPROCESSING?
- * ------------------
- * - Remove noise that doesn't add meaning
- * - Normalize format for consistent embeddings
- * - Improve retrieval quality
- * 
- * @param text - Raw text from Slack message
- * @returns Cleaned text ready for embedding
  */
 export function preprocessText(text: string): string {
   let processed = text;
 
-  // Remove Slack user mentions (<@U123ABC>) and replace with placeholder
+  // Remove Slack user mentions
   processed = processed.replace(/<@[A-Z0-9]+>/g, '@user');
 
-  // Remove Slack channel mentions (<#C123ABC|channel-name>)
+  // Remove Slack channel mentions
   processed = processed.replace(/<#[A-Z0-9]+\|([^>]+)>/g, '#$1');
   processed = processed.replace(/<#[A-Z0-9]+>/g, '#channel');
 
-  // Remove URLs but keep a marker
+  // Remove URLs
   processed = processed.replace(/<https?:\/\/[^>]+>/g, '[link]');
   processed = processed.replace(/https?:\/\/\S+/g, '[link]');
 
-  // Remove emoji codes :emoji_name:
+  // Remove emoji codes
   processed = processed.replace(/:[a-z0-9_+-]+:/g, '');
 
   // Normalize whitespace
   processed = processed.replace(/\s+/g, ' ').trim();
 
-  // Remove very short messages (likely just reactions or acknowledgments)
+  // Remove very short messages
   if (processed.length < 10) {
     return '';
   }
@@ -248,10 +164,10 @@ export function preprocessText(text: string): string {
 
 /**
  * Get embedding model information.
- * Useful for debugging and monitoring.
  */
 export function getEmbeddingConfig() {
   return {
+    provider: 'cohere',
     model: EMBEDDING_MODEL,
     dimensions: EMBEDDING_DIMENSIONS,
     maxBatchSize: MAX_BATCH_SIZE,

@@ -1,5 +1,5 @@
-import { z } from 'zod';
 import dotenv from 'dotenv';
+import { z } from 'zod';
 
 dotenv.config();
 
@@ -9,7 +9,7 @@ const ConfigSchema = z.object({
   slack: z.object({
     botToken: z.string().min(1, 'SLACK_BOT_TOKEN is required'),
     appToken: z.string().min(1, 'SLACK_APP_TOKEN is required'),
-    userToken: z.string().optional(), // For reminders API (xoxp-...)
+    userToken: z.string().optional(),
     signingSecret: z.string().optional(),
   }),
 
@@ -17,13 +17,13 @@ const ConfigSchema = z.object({
   ai: z.object({
     anthropicApiKey: z.string().optional(),
     openaiApiKey: z.string().optional(),
-    defaultModel: z.string().default('claude-sonnet-4-20250514'),
+    defaultModel: z.string().default('claude-3-sonnet-20240229'),
   }),
 
   // RAG Configuration
   rag: z.object({
     enabled: z.boolean().default(true),
-    embeddingModel: z.string().default('text-embedding-3-small'),
+    embeddingModel: z.string().default('embed-english-v3.0'),
     vectorDbPath: z.string().default('./data/chroma'),
     indexIntervalHours: z.number().default(1),
     maxResults: z.number().default(10),
@@ -78,17 +78,17 @@ function loadConfig(): Config {
     slack: {
       botToken: process.env.SLACK_BOT_TOKEN || '',
       appToken: process.env.SLACK_APP_TOKEN || '',
-      userToken: process.env.SLACK_USER_TOKEN, // For reminders API
+      userToken: process.env.SLACK_USER_TOKEN,
       signingSecret: process.env.SLACK_SIGNING_SECRET,
     },
     ai: {
       anthropicApiKey: process.env.ANTHROPIC_API_KEY,
       openaiApiKey: process.env.OPENAI_API_KEY,
-      defaultModel: process.env.DEFAULT_MODEL || 'claude-sonnet-4-20250514',
+      defaultModel: process.env.DEFAULT_MODEL || 'claude-3-sonnet-20240229',
     },
     rag: {
       enabled: process.env.RAG_ENABLED !== 'false',
-      embeddingModel: process.env.RAG_EMBEDDING_MODEL || 'text-embedding-3-small',
+      embeddingModel: process.env.RAG_EMBEDDING_MODEL || 'embed-english-v3.0',
       vectorDbPath: process.env.RAG_VECTOR_DB_PATH || './data/chroma',
       indexIntervalHours: parseInt(process.env.RAG_INDEX_INTERVAL_HOURS || '1', 10),
       maxResults: parseInt(process.env.RAG_MAX_RESULTS || '10', 10),
@@ -146,4 +146,19 @@ function loadConfig(): Config {
   return result.data;
 }
 
+// Create the config
 export const config = loadConfig();
+
+// 👇 MOVED VALIDATION HERE - after config is created
+// Validate Cohere API key if RAG is enabled
+if (config.rag.enabled && !process.env.COHERE_API_KEY) {
+  console.error('❌ RAG is enabled but COHERE_API_KEY is missing in .env file');
+  console.error('   Get a free API key at: https://dashboard.cohere.com/api-keys');
+  process.exit(1);
+}
+
+// Log successful config load
+console.log('✅ Configuration loaded successfully');
+if (config.rag.enabled) {
+  console.log(`   RAG enabled with Cohere embeddings (${config.rag.embeddingModel})`);
+}
