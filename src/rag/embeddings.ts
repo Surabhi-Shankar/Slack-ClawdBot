@@ -7,10 +7,10 @@ import { createModuleLogger } from '../utils/logger.js';
 
 const logger = createModuleLogger('embeddings');
 
-// Initialize Cohere client
-const cohere = new CohereClient({
+// Initialize Cohere client with type assertion to avoid constructor issues
+const cohere = new (CohereClient as any)({
   token: process.env.COHERE_API_KEY,
-});
+}) as any;
 
 // Cohere embedding configuration
 const EMBEDDING_MODEL = 'embed-english-v3.0';
@@ -78,11 +78,13 @@ export async function createEmbeddings(texts: string[]): Promise<number[][]> {
       });
 
       // Map results back to original positions
-      response.embeddings.forEach((embedding, batchIndex) => {
-        const originalIndex = batch[batchIndex].index;
-        results[originalIndex] = embedding;
-      });
-
+      if (response && response.embeddings && Array.isArray(response.embeddings)) {
+        response.embeddings.forEach((embedding: number[], batchIndex: number) => {
+          const originalIndex = batch[batchIndex].index;
+          results[originalIndex] = embedding;
+        });
+      }
+      
       // Small delay between batches
       if (i + MAX_BATCH_SIZE < validTexts.length) {
         await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY_MS));
