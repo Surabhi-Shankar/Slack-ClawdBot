@@ -46,7 +46,8 @@ const ConfigSchema = z.object({
 
   // Security Settings
   security: z.object({
-    dmPolicy: z.enum(['open', 'pairing', 'allowlist']).default('pairing'),
+    adminUserIds: z.array(z.string()).default([]),
+    dmPolicy: z.enum(['open', 'pairing', 'closed']).default('pairing'),
     allowedUsers: z.array(z.string()).default(['*']),
     allowedChannels: z.array(z.string()).default(['*']),
   }),
@@ -64,7 +65,12 @@ export type Config = z.infer<typeof ConfigSchema>;
 
 function parseArrayFromEnv(value: string | undefined): string[] {
   if (!value) return ['*'];
-  return value.split(',').map((s) => s.trim());
+  return value.split(',').map((s) => s.trim()).filter(s => s.length > 0);
+}
+
+function parseAdminIdsFromEnv(value: string | undefined): string[] {
+  if (!value) return [];
+  return value.split(',').map((s) => s.trim()).filter(s => s.length > 0);
 }
 
 function loadConfig(): Config {
@@ -93,13 +99,14 @@ function loadConfig(): Config {
       extractionModel: process.env.MEMORY_EXTRACTION_MODEL || 'gpt-4o-mini',
     },
     app: {
-      logLevel: process.env.LOG_LEVEL || 'info',
+      logLevel: (process.env.LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'info',
       databasePath: process.env.DATABASE_PATH || './data/assistant.db',
       maxHistoryMessages: parseInt(process.env.MAX_HISTORY_MESSAGES || '50', 10),
       sessionTimeoutMinutes: parseInt(process.env.SESSION_TIMEOUT_MINUTES || '60', 10),
     },
     security: {
-      dmPolicy: process.env.DM_POLICY || 'pairing',
+      adminUserIds: parseAdminIdsFromEnv(process.env.ADMIN_USER_IDS),
+      dmPolicy: (process.env.DM_POLICY as 'open' | 'pairing' | 'closed') || 'pairing',
       allowedUsers: parseArrayFromEnv(process.env.ALLOWED_USERS),
       allowedChannels: parseArrayFromEnv(process.env.ALLOWED_CHANNELS),
     },
@@ -125,6 +132,15 @@ function loadConfig(): Config {
   if (!result.data.ai.anthropicApiKey && !result.data.ai.openaiApiKey) {
     console.error('At least one AI provider (Anthropic or OpenAI) must be configured');
     process.exit(1);
+  }
+
+  // Log configuration summary on startup
+  if (result.data.app.logLevel === 'debug') {
+    console.log('Configuration loaded:', {
+      dmPolicy: result.data.security.dmPolicy,
+      adminCount: result.data.security.adminUserIds.length,
+      features: result.data.features,
+    });
   }
 
   return result.data;
