@@ -781,6 +781,8 @@ export { processMessage as default };
 
 /**
  * Summarize thread messages using Claude.
+ *//**
+ * Summarize thread messages using Claude.
  */
 export async function summarizeThread(
   messages: Message[],
@@ -817,5 +819,11 @@ Summary:`;
     ],
   });
 
-  return response.content[0].text || 'Failed to generate summary.';
+  // Safely extract text content - handles both text blocks and tool use blocks
+  const textBlock = response.content.find(block => block.type === 'text');
+  if (textBlock && 'text' in textBlock) {
+    return textBlock.text;
+  }
+  
+  return 'Failed to generate summary.';
 }
